@@ -1,114 +1,137 @@
 require "sinatra"
 require "sinatra/reloader"
-require "sinatra/content_for"
 require "tilt/erubis"
+require "redcarpet"
+require 'pry'
+require 'yaml'
 
-configure do 
+configure do
   enable :sessions
-  set :session_secret, 'secret'
-end 
-
-before do 
-  session[:lists] ||= []
-end 
-
-get "/" do 
-  redirect "/lists"
-end 
-
-
-#View all the lists
-get "/lists" do
-  @lists = session[:lists]
-  erb :lists, layout: :layout
+  set :session_secret, 'super secret'
 end
 
-#Render the new lists form
-get "/lists/new" do 
-  erb :new_list, layout: :layout 
+def data_path
+  if ENV["RACK_ENV"] == "test"
+    File.expand_path("../test/data", __FILE__)
+  else
+    File.expand_path("../data", __FILE__)
+  end
+end
+
+def render_markdown(text)
+  markdown = Redcarpet::Markdown.new(Redcarpet::Render::HTML)
+  markdown.render(text)
+end
+
+def load_file_content(path)
+  content = File.read(path)
+  case File.extname(path)
+  when ".txt"
+    headers["Content-Type"] = "text/plain"
+    content
+  when ".md"
+    erb render_markdown(content)
+  end
+end
+
+get "/" do
+  pattern = File.join(data_path, "*")
+  @files = Dir.glob(pattern).map do |path|
+    File.basename(path)
+  end
+  erb :index
+end
+
+get "/:filename" do
+  file_path = File.join(data_path, params[:filename])
+
+  if File.exist?(file_path)
+    load_file_content(file_path)
+  else
+    session[:message] = "#{params[:filename]} does not exist."
+    redirect "/"
+  end
+end
+
+get "/:filename/edit" do
+  authorized_check
+  file_path = File.join(data_path, params[:filename])
+
+  @filename = params[:filename]
+  @content = File.read(file_path)
+
+  erb :edit
+end
+
+post "/:filename" do
+  file_path = File.join(data_path, params[:filename])
+
+  File.write(file_path, params[:content])
+
+  session[:message] = "#{params[:filename]} has been updated."
+  redirect "/"
+end
+
+get "/views/new" do 
+  authorized_check
+  erb :new
 end 
 
-#Return an error message if name is invalid. Return nil if name is valid
-def error_for_list_name(name)
-  if !(1..100).cover? name.size
-    "List name must be between 1 and 100 characters"
-  elsif session[:lists].any? {|list| list[:name] == name}
-    "List name must be unique"
-  end 
+post "/new/create" do 
+  authorized_check
+  file_path = File.join(data_path, params[:filename])
+  File.write(file_path, "")
+  session[:message] = "#{params[:filename]} has been created"
+
+  redirect "/"
 end 
 
-def error_for_todo(name)
-  if !(1..100).cover? name.size
-    "Todo must be between 1 and 100 characters"
-  end 
+get "/:filename/delete" do 
+  authorized_check
+  file_path = File.join(data_path, params[:filename])
+  File.delete(file_path)
+  session[:message] = "#{params[:filename]} was deleted"
+  
+  redirect "/"
+
 end 
 
-#Create a new list
-post "/lists" do 
-  list_name = params[:list_name].strip
+get "/user/signin" do 
+  erb :signin
+end 
 
-  error = error_for_list_name(list_name)
-  if error
-    session[:error] = error
-    erb :new_list, layout: :layout
+post "/user/auth" do 
+  session[:username] = params[:username]
+  session[:password] = params[:password]
+  if name_and_password_match
+    session[:message] = "Welcome!"
+    redirect "/"
   else 
-    session[:lists] << {name: list_name, todos: []}
-    session[:success] = "The list has been created"
-    redirect "/lists"
+    session[:message] = "Invalid credentials"
+    status 422
+    erb :signin
   end 
 end 
 
-get "/lists/:id" do 
-  id = params[:id].to_i
-  @list = session[:lists][id]
-  erb :list, layout: :layout
+post "/user/signout" do 
+  session.delete(:username)
+  session.delete(:password)
+  session[:message] = "You have been signed out"
+  redirect "/"
 end 
 
-#Edit existing todo list
-get "/lists/:id/edit" do 
-  id = params[:id].to_i
-  @list = session[:lists][id]
-  erb :edit_list, layout: :layout 
-end 
-
-#Update existing todo list
-post "/lists/:id" do
-  list_name = params[:list_name].strip
-  id = params[:id].to_i
-  @list = session[:lists][id]
-
-  error = error_for_list_name(list_name)
-  if error
-    session[:error] = error
-    erb :edit_list, layout: :layout
-  else 
-    @list[:name] = list_name
-    session[:success] = "The list has been updated"
-    redirect "/lists/#{id}"
+def authorized_check
+  unless name_and_password_match
+    session[:message] = "You must be signed in to do that"
+    redirect "/"
   end 
 end 
 
-#Delete a todo list
-post "/lists/:id/destroy" do 
-  id = params[:id].to_i
-  session[:lists].delete_at(id)
-  session[:success] = "The list has been deleted"
-  redirect "/lists"
-end 
-
-#Add new todo to a list
-post "/lists/:list_id/todos" do 
-  list_id = params[:list_id].to_i
-  @list = session[:lists][list_id]
-  text = params[:todo].strip
-
-  error = error_for_todo(text)
-  if error
-    session[:error] = error
-    erb :list, layout: :layout 
-  else 
-    @list[:todos] << {name: text, completed: false}
-    session[:success] = "The todo was added"
-    redirect "/lists/#{list_id}"
+def name_and_password_match
+  users = YAML.load_file('users.yml')
+  match_hash = users.select do |username, password|
+    session[:username] == username && password == session[:password]
   end 
+
+  !match_hash.empty?
 end 
